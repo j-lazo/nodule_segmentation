@@ -621,6 +621,7 @@ def main():
         #else:
         #    raise ValueError(f"Unknown val_mode: {args.val_mode}")
         
+        print(f"Epoch {epoch:03d}/{args.epochs:03d} - train_loss: {train_loss:.4f}, train_dice: {train_dice:.4f}, val_loss: {val_loss:.4f}, val_dice: {val_dice:.4f}")
         log = {
             "epoch": epoch,
             "train_loss": float(train_loss),
@@ -657,6 +658,8 @@ def main():
             if val_sw_dice is not None:
                 metric_for_best = val_sw_dice
         
+        print(f"Current best val Dice: {best_val_dice:.4f}")
+        print(metric_for_best is not None and metric_for_best > best_val_dice)
         if metric_for_best is not None and metric_for_best > best_val_dice:
             best_val_dice = metric_for_best
             torch.save(
