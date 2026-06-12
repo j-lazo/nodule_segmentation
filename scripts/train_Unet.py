@@ -592,7 +592,8 @@ def main():
 
     best_val_dice = 0.0
     history = []
-
+    metric_for_best = None
+    
     for epoch in range(1, args.epochs + 1):
 
         train_loss, train_dice = train_one_epoch(model, train_loader, optimizer, criterion, device, epoch, args.epochs)
@@ -650,7 +651,7 @@ def main():
 
         # save according to the prefered criteria 
 
-        metric_for_best = None
+        
 
         if args.save_best_on == "patch":
             metric_for_best = val_dice
