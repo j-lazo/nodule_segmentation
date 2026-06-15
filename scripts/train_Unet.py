@@ -590,13 +590,8 @@ def main():
     history = []
     metric_for_best = None
 
-    if args.save_best_on == "patch":
-            metric_for_best = val_dice
-    elif args.save_best_on == "sliding_window":
-        if val_sw_dice is not None:
-            metric_for_best = val_sw_dice
     
-    print('Meitrc for best model: ', metric_for_best)
+    
     for epoch in range(1, args.epochs + 1):
 
         train_loss, train_dice = train_one_epoch(model, train_loader, optimizer, criterion, device, epoch, args.epochs)
@@ -613,6 +608,14 @@ def main():
             val_sw_loss, val_sw_dice = validate_one_epoch_sliding_window(model=model, loader=val_loader_sw, criterion=criterion, device=device, epoch=epoch, epochs=args.epochs, roi_size=patch_size,
                                                                          sw_batch_size=args.val_sw_batch_size, overlap=args.val_sw_overlap, threshold=0.5,)
         
+        if args.save_best_on == "patch":
+                metric_for_best = val_dice
+        elif args.save_best_on == "sliding_window":
+            if val_sw_dice is not None:
+                metric_for_best = val_sw_dice
+        
+        print('Meitrc for best model : ', metric_for_best)
+
         scheduler.step()
         #val_loss, val_dice = validate_one_epoch(model, val_loader, criterion, device, epoch, args.epochs)
 
