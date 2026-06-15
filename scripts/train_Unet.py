@@ -364,9 +364,7 @@ def predict_roi_and_paste(model, image, boxes, device, factor=16, threshold=0.5,
         z0, y0, x0, z1, y1, x1 = box
 
         crop = image[z0:z1, y0:y1, x0:x1]
-
         crop_padded, pad_info = pad_to_factor_3d(crop, factor=factor, mode="constant", constant_values=0,)
-
         x = torch.from_numpy(crop_padded).float().unsqueeze(0).unsqueeze(0).to(device)
 
         logits = model(x)
@@ -416,8 +414,7 @@ def evaluate_nodulenet_style_roi_test(model, test_samples, device, output_dir, r
                 
         assert pred.shape == original_shape, (
             f"Prediction shape mismatch for {case_id}: "
-            f"pred={pred.shape}, image={original_shape}"
-        )
+            f"pred={pred.shape}, image={original_shape}")
 
         dsc = lm.dice_numpy(pred, gt)
         iou = lm.iou_numpy(pred, gt)
@@ -556,8 +553,7 @@ def main():
         fp.save_json(internal_test_samples, exp_dir / "test_split.json")
         
     elif args.dataset_loader == 'Luna_16':
-        
-        train_loader, val_loader, train_samples, val_samples, test_samples = dl.create_dataloaders_luna16(path_volumes=args.images_dir, 
+        train_loader, val_loader, val_loader_sw, test_loader, train_samples, val_samples, test_samples = dl.create_dataloaders_luna16(path_volumes=args.images_dir, 
                                                                                                           path_masks=args.masks_dir, 
                                                                                                           path_ids_lin_file=args.path_link_file, 
                                                                                                           patch_size=patch_size, 
@@ -593,7 +589,14 @@ def main():
     best_val_dice = 0.0
     history = []
     metric_for_best = None
+
+    if args.save_best_on == "patch":
+            metric_for_best = val_dice
+    elif args.save_best_on == "sliding_window":
+        if val_sw_dice is not None:
+            metric_for_best = val_sw_dice
     
+    print('Meitrc for best model: ', metric_for_best)
     for epoch in range(1, args.epochs + 1):
 
         train_loss, train_dice = train_one_epoch(model, train_loader, optimizer, criterion, device, epoch, args.epochs)
@@ -623,6 +626,7 @@ def main():
         #    raise ValueError(f"Unknown val_mode: {args.val_mode}")
         
         print(f"Epoch {epoch:03d}/{args.epochs:03d} - train_loss: {train_loss:.4f}, train_dice: {train_dice:.4f}, val_loss: {val_loss:.4f}, val_dice: {val_dice:.4f}")
+        print('print here')
         log = {
             "epoch": epoch,
             "train_loss": float(train_loss),
@@ -635,7 +639,6 @@ def main():
         }
         
         history.append(log)
-
 
         msg = (
             f"Epoch [{epoch:03d}/{args.epochs:03d}] "
@@ -650,17 +653,12 @@ def main():
         print(msg)
 
         # save according to the prefered criteria 
-
-        
-
-        if args.save_best_on == "patch":
-            metric_for_best = val_dice
-        elif args.save_best_on == "sliding_window":
-            if val_sw_dice is not None:
-                metric_for_best = val_sw_dice
         
         print(f"Current best val Dice: {best_val_dice:.4f}")
         print(metric_for_best is not None and metric_for_best > best_val_dice)
+        print(metric_for_best > best_val_dice)
+        
+        
         if metric_for_best is not None and metric_for_best > best_val_dice:
             best_val_dice = metric_for_best
             torch.save(
@@ -704,7 +702,7 @@ def main():
     has_external_test = args.test_images_dir is not None and args.test_masks_dir is not None
     has_internal_test = internal_test_loader is not None and len(internal_test_samples) > 0
 
-    # Test dataset evaluation
+    # Test dataset evaluation sliding-window style (using MONAI sliding_window_inference)
     if has_external_test or has_internal_test:
         print("\nLoading best checkpoint for test evaluation...")
 
@@ -716,12 +714,8 @@ def main():
 
         if has_external_test:
             print("Using external test dataset.")
-            test_loader, test_samples = dl.create_test_dataloader(
-                images_dir=args.test_images_dir,
-                masks_dir=args.test_masks_dir,
-                patch_size=patch_size,
-                num_workers=args.num_workers,
-            )
+            test_loader, test_samples = dl.create_test_dataloader(images_dir=args.test_images_dir, masks_dir=args.test_masks_dir, patch_size=patch_size, num_workers=args.num_workers,)
+            
         else:
             print("Using internal test split from the main dataset.")
             test_loader = internal_test_loader
@@ -732,8 +726,7 @@ def main():
         rows, summary = evaluate_on_test_set_sliding_window(model=model, loader=test_loader, device=device, output_dir=exp_dir, save_predictions=args.save_test_predictions, 
                                                  threshold=0.5, roi_size=patch_size, sw_batch_size=1, overlap=0.5,)
         
-        
-        
+    # Test dataset evaluation NoduleNet-style
     if len(test_samples) > 0:
         print("\nLoading best model for NoduleNet-style ROI test...")
 
@@ -754,11 +747,6 @@ def main():
         print(f"ROI test results: mean_dice={summary['mean_dice']:.4f}, "
               f"mean_iou={summary['mean_iou']:.4f}")
         print(f"Saved ROI test CSV to: {exp_dir / 'test_metrics_roi.csv'}")                                     
-        #if args.evaluate_test_on_sliding_window:
-        #    rows, summary = evaluate_on_test_set_sliding_window(model=model, loader=test_loader, device=device, output_dir=exp_dir, save_predictions=args.save_test_predictions, 
-        #                                         threshold=0.5, roi_size=patch_size, sw_batch_size=1, overlap=0.5,)
-        #else:
-        #    rows, summary = evaluate_on_test_set(model=model, loader=test_loader, device=device, output_dir=exp_dir, save_predictions=args.save_test_predictions, threshold=0.5,)
 
         print(
             f"Test results: mean_dice={summary['mean_dice']:.4f} "

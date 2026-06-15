@@ -12,10 +12,20 @@ from torch.utils.data import Dataset, DataLoader
 from . import image_processing_functions as ip
 from . import file_processing as fp
 
-
 class Luna16PairedRoiDataset(Dataset):
-    def __init__(self, samples, patch_size, training = True, positive_crop_prob = 0.8, hu_min = -1000.0, hu_max = 400.0, target_spacing=(1.0, 1.0, 1.0),):
-        
+    def __init__(
+        self,
+        samples,
+        patch_size=(128, 128, 128),
+        training=True,
+        use_patch_sampling=True,
+        positive_crop_prob=0.8,
+        hu_min=-1000.0,
+        hu_max=400.0,
+        target_spacing=(1.0, 1.0, 1.0),
+        normalize_mode="clip",
+        full_volume_inference=False,
+    ):
         if isinstance(samples, dict):
             self.samples = []
             for case_id, paths in samples.items():
@@ -29,37 +39,71 @@ class Luna16PairedRoiDataset(Dataset):
         else:
             raise TypeError(f"samples must be dict or list, got {type(samples)}")
 
-        self.patch_size = patch_size
+        if isinstance(patch_size, int):
+            patch_size = (patch_size, patch_size, patch_size)
+
+        self.patch_size = tuple(patch_size)
         self.training = training
+        self.use_patch_sampling = use_patch_sampling
         self.positive_crop_prob = positive_crop_prob
         self.hu_min = hu_min
         self.hu_max = hu_max
         self.target_spacing = tuple(target_spacing)
-        
-    
+        self.normalize_mode = normalize_mode
+        self.full_volume_inference = full_volume_inference
+
     def __len__(self):
         return len(self.samples)
 
+    def _normalize(self, image):
+        if self.normalize_mode == "clip":
+            return ip.clip_and_scale_ct(image, self.hu_min, self.hu_max)
+        elif self.normalize_mode == "zscore":
+            return ip.zscore_nonzero(image)
+        else:
+            raise ValueError(f"Unknown normalize_mode: {self.normalize_mode}")
+
     def __getitem__(self, idx):
         item = self.samples[idx]
+
         image, image_spacing = ip.load_mha(item["image"])
         mask, mask_spacing = ip.load_nii_mask(item["mask"])
+
         original_shape = list(image.shape)
         original_spacing = list(image_spacing)
-        
-        image = ip.resample_volume_to_spacing(image, current_spacing=image_spacing, target_spacing=self.target_spacing, is_mask=False,)
-        mask = ip.resample_volume_to_spacing(mask, current_spacing=mask_spacing, target_spacing=self.target_spacing, is_mask=True)
 
-        image = ip.clip_and_scale_ct(image, self.hu_min, self.hu_max)
+        # Resample to fixed voxel spacing.
+        # Arrays are assumed [D, H, W], spacing is assumed (z, y, x).
+        image = ip.resample_volume_to_spacing(image, current_spacing=image_spacing, target_spacing=self.target_spacing, is_mask=False,)
+        mask = ip.resample_volume_to_spacing(mask, current_spacing=mask_spacing, target_spacing=self.target_spacing, is_mask=True,)
+
+        resampled_shape = list(image.shape)
+        image = self._normalize(image)
 
         if self.training:
-            force_fg = (np.random.rand() < self.positive_crop_prob) and (mask.sum() > 0)
+            if self.use_patch_sampling:
+                force_fg = (np.random.rand() < self.positive_crop_prob) and (mask.sum() > 0)
 
-            image, mask = ip.center_or_random_crop(image=image, mask=mask, crop_size=self.patch_size, force_foreground=force_fg,)
+                image, mask = ip.center_or_random_crop(image=image, mask=mask, crop_size=self.patch_size, force_foreground=force_fg,)
+                
+            else:
+                image = ip.resize_3d_numpy(image, self.patch_size, is_mask=False)
+                mask = ip.resize_3d_numpy(mask, self.patch_size, is_mask=True)
+
             image, mask = ip.random_flip_3d(image, mask)
             image = ip.random_intensity_shift_scale(image)
 
-        image = torch.from_numpy(image).float().unsqueeze(0)
+        else:
+            # For sliding-window validation/test:
+            # keep full resampled volume.
+            #
+            # For old-style validation/test:
+            # resize to patch_size.
+            if not self.full_volume_inference:
+                image = ip.resize_3d_numpy(image, self.patch_size, is_mask=False)
+                mask = ip.resize_3d_numpy(mask, self.patch_size, is_mask=True)
+
+        image = torch.from_numpy(image).float().unsqueeze(0)  # [1, D, H, W]
         mask = torch.from_numpy(mask.astype(np.float32)).float().unsqueeze(0)
 
         return {
@@ -70,8 +114,70 @@ class Luna16PairedRoiDataset(Dataset):
             "mask_path": item["mask"],
             "original_shape": original_shape,
             "original_spacing": original_spacing,
+            "resampled_shape": resampled_shape,
             "target_spacing": list(self.target_spacing),
         }
+
+
+# class Luna16PairedRoiDataset(Dataset):
+#     def __init__(self, samples, patch_size, training = True, positive_crop_prob = 0.8, hu_min = -1000.0, hu_max = 400.0, target_spacing=(1.0, 1.0, 1.0),):
+        
+#         if isinstance(samples, dict):
+#             self.samples = []
+#             for case_id, paths in samples.items():
+#                 self.samples.append({
+#                     "case_id": case_id,
+#                     "image": paths["path_image"],
+#                     "mask": paths["path_mask"],
+#                 })
+#         elif isinstance(samples, list):
+#             self.samples = samples
+#         else:
+#             raise TypeError(f"samples must be dict or list, got {type(samples)}")
+
+#         self.patch_size = patch_size
+#         self.training = training
+#         self.positive_crop_prob = positive_crop_prob
+#         self.hu_min = hu_min
+#         self.hu_max = hu_max
+#         self.target_spacing = tuple(target_spacing)
+        
+    
+#     def __len__(self):
+#         return len(self.samples)
+
+#     def __getitem__(self, idx):
+#         item = self.samples[idx]
+#         image, image_spacing = ip.load_mha(item["image"])
+#         mask, mask_spacing = ip.load_nii_mask(item["mask"])
+#         original_shape = list(image.shape)
+#         original_spacing = list(image_spacing)
+        
+#         image = ip.resample_volume_to_spacing(image, current_spacing=image_spacing, target_spacing=self.target_spacing, is_mask=False,)
+#         mask = ip.resample_volume_to_spacing(mask, current_spacing=mask_spacing, target_spacing=self.target_spacing, is_mask=True)
+
+#         image = ip.clip_and_scale_ct(image, self.hu_min, self.hu_max)
+
+#         if self.training:
+#             force_fg = (np.random.rand() < self.positive_crop_prob) and (mask.sum() > 0)
+
+#             image, mask = ip.center_or_random_crop(image=image, mask=mask, crop_size=self.patch_size, force_foreground=force_fg,)
+#             image, mask = ip.random_flip_3d(image, mask)
+#             image = ip.random_intensity_shift_scale(image)
+
+#         image = torch.from_numpy(image).float().unsqueeze(0)
+#         mask = torch.from_numpy(mask.astype(np.float32)).float().unsqueeze(0)
+
+#         return {
+#             "image": image,
+#             "mask": mask,
+#             "case_id": item["case_id"],
+#             "image_path": item["image"],
+#             "mask_path": item["mask"],
+#             "original_shape": original_shape,
+#             "original_spacing": original_spacing,
+#             "target_spacing": list(self.target_spacing),
+#         }
 
 
 class LungNodule3DDataset(Dataset):
@@ -198,20 +304,46 @@ def create_dataloaders_luna25(images_dir, masks_dir, patch_size, batch_size, num
     return train_loader, val_loader_patch, val_loader_sw, test_loader, train_samples, val_samples, test_samples
 
 
-def create_dataloaders_luna16(path_volumes, path_masks, path_ids_lin_file, patch_size, batch_size, num_workers, train_ratio=0.7,
-                              val_ratio=0.2, test_ratio=0.1, seed=42, train_positive_crop_prob=0.8, val_positive_crop_prob=0.5,):
-    
-    
+def create_dataloaders_luna16(path_volumes, path_masks, path_ids_lin_file, patch_size, batch_size, num_workers, train_ratio=0.7, val_ratio=0.2, 
+                              test_ratio=0.1, seed=42, train_positive_crop_prob=0.8, val_positive_crop_prob=0.5, target_spacing=(1.0, 1.0, 1.0), normalize_mode="clip",):
+
     dict_pairs = create_image_maks_pairs(path_volumes, path_masks, path_ids_lin_file)
+
     train_samples, val_samples, test_samples = split_dict_pairs(dict_pairs, train_size=train_ratio, val_size=val_ratio, test_size=test_ratio, seed=seed)
 
-    train_ds = Luna16PairedRoiDataset(train_samples, patch_size=patch_size, training=True, positive_crop_prob=train_positive_crop_prob,)
-    val_ds = Luna16PairedRoiDataset(val_samples,patch_size=patch_size, training=True, positive_crop_prob=val_positive_crop_prob,)
+    train_ds = Luna16PairedRoiDataset(train_samples, patch_size=patch_size, training=True, use_patch_sampling=True, positive_crop_prob=train_positive_crop_prob, 
+                                      target_spacing=target_spacing, normalize_mode=normalize_mode, full_volume_inference=False,)
+    val_ds_patch = Luna16PairedRoiDataset(val_samples, patch_size=patch_size, training=True, use_patch_sampling=True, positive_crop_prob=val_positive_crop_prob,
+                                          target_spacing=target_spacing, normalize_mode=normalize_mode, full_volume_inference=False,)
+    val_ds_sw = Luna16PairedRoiDataset(val_samples, patch_size=patch_size, training=False, use_patch_sampling=False, positive_crop_prob=val_positive_crop_prob, 
+                                       target_spacing=target_spacing, normalize_mode=normalize_mode, full_volume_inference=True,)
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=torch.cuda.is_available(),)
-    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=num_workers, pin_memory=torch.cuda.is_available(),)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=torch.cuda.is_available(), drop_last=False,)
+    val_loader_patch = DataLoader(val_ds_patch, batch_size=1, shuffle=False, num_workers=num_workers, pin_memory=torch.cuda.is_available(), drop_last=False,)
+    val_loader_sw = DataLoader(val_ds_sw, batch_size=1, shuffle=False, num_workers=num_workers, pin_memory=torch.cuda.is_available(), drop_last=False,)
 
-    return train_loader, val_loader, train_samples, val_samples, test_samples
+    test_loader = None
+    if len(test_samples) > 0:
+        test_ds = Luna16PairedRoiDataset(test_samples, patch_size=patch_size, training=False, use_patch_sampling=False, target_spacing=target_spacing, normalize_mode=normalize_mode, full_volume_inference=True,)
+        test_loader = DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=num_workers, pin_memory=torch.cuda.is_available(), drop_last=False,)
+
+    return train_loader, val_loader_patch, val_loader_sw, test_loader, train_samples, val_samples, test_samples
+
+
+# def create_dataloaders_luna16(path_volumes, path_masks, path_ids_lin_file, patch_size, batch_size, num_workers, train_ratio=0.7,
+#                               val_ratio=0.2, test_ratio=0.1, seed=42, train_positive_crop_prob=0.8, val_positive_crop_prob=0.5,):
+    
+    
+#     dict_pairs = create_image_maks_pairs(path_volumes, path_masks, path_ids_lin_file)
+#     train_samples, val_samples, test_samples = split_dict_pairs(dict_pairs, train_size=train_ratio, val_size=val_ratio, test_size=test_ratio, seed=seed)
+
+#     train_ds = Luna16PairedRoiDataset(train_samples, patch_size=patch_size, training=True, positive_crop_prob=train_positive_crop_prob,)
+#     val_ds = Luna16PairedRoiDataset(val_samples,patch_size=patch_size, training=True, positive_crop_prob=val_positive_crop_prob,)
+
+#     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=torch.cuda.is_available(),)
+#     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=num_workers, pin_memory=torch.cuda.is_available(),)
+
+#     return train_loader, val_loader, train_samples, val_samples, test_samples
 
 
 def create_test_dataloader(images_dir, masks_dir, patch_size, num_workers):
