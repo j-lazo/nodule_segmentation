@@ -659,8 +659,7 @@ def main():
         
         print(f"Current best val Dice: {best_val_dice:.4f}")
         print(metric_for_best is not None and metric_for_best > best_val_dice)
-        print(metric_for_best > best_val_dice)
-        
+      
         
         if metric_for_best is not None and metric_for_best > best_val_dice:
             best_val_dice = metric_for_best
